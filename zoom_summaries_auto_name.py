@@ -26,6 +26,31 @@ def log(msg: str):
     print(msg, flush=True)
 
 
+def _safe_close_page(tab) -> None:
+    if tab is None:
+        return
+    try:
+        if not tab.is_closed():
+            tab.close()
+    except Exception:
+        pass
+
+
+def _return_to_summaries_list(docs_tab, detail_tab, list_url: str):
+    """
+    Close the Zoom Docs tab when it was opened in a new window, then open the
+    summaries list on the original tab. Prevents unbounded tab growth on large runs.
+    """
+    _safe_close_page(docs_tab)
+    try:
+        if detail_tab is not None and not detail_tab.is_closed():
+            detail_tab.goto(list_url)
+    except Exception:
+        pass
+    time.sleep(2)
+    return detail_tab
+
+
 def clean_filename(name: str, max_length: int = 150) -> str:
     r"""
     Clean a string to be safe for use as a filename.
@@ -518,7 +543,9 @@ def download_zoom_summaries(mode: str = "all", target_date: Optional[date] = Non
                     except:
                         pass
                     
-                    # Step 1: Click "Open in Docs" button on detail page
+                    # Step 1: Open in Docs — keep one list/detail tab; close a new Docs tab when done
+                    detail_tab = page
+                    docs_tab = None
                     open_docs_clicked = False
                     open_docs_selectors = [
                         "button:has-text('Open in Docs')",
@@ -526,46 +553,48 @@ def download_zoom_summaries(mode: str = "all", target_date: Optional[date] = Non
                         "[class*='open-in-docs']",
                         "button:has-text('Open')",
                     ]
-                    
+
                     for selector in open_docs_selectors:
                         try:
-                            open_docs_btn = page.query_selector(selector)
-                            if open_docs_btn and open_docs_btn.is_visible():
-                                # This might open in a new tab, so handle that
-                                with context.expect_page() as new_page_info:
-                                    page.evaluate("el => el.click()", open_docs_btn)
-                                
-                                # Check if new page opened
-                                try:
-                                    new_page = new_page_info.value
-                                    new_page.wait_for_load_state("domcontentloaded")
-                                    page = new_page  # Switch to the new tab
-                                    log(f"   Opened Docs in new tab")
-                                except:
-                                    # Didn't open in new tab, just wait
-                                    time.sleep(3)
-                                
-                                open_docs_clicked = True
-                                log(f"   Clicked 'Open in Docs'")
-                                break
-                        except Exception as e:
-                            # Try without expecting new page
+                            open_docs_btn = detail_tab.query_selector(selector)
+                            if not open_docs_btn or not open_docs_btn.is_visible():
+                                continue
                             try:
-                                open_docs_btn = page.query_selector(selector)
-                                if open_docs_btn:
+                                with context.expect_page(timeout=15000) as new_page_info:
+                                    detail_tab.evaluate("el => el.click()", open_docs_btn)
+                                docs_tab = new_page_info.value
+                                docs_tab.wait_for_load_state("domcontentloaded")
+                                page = docs_tab
+                                log("   Opened Docs in new tab")
+                                open_docs_clicked = True
+                                break
+                            except PlaywrightTimeout:
+                                time.sleep(1)
+                                if "docs.zoom" in (detail_tab.url or "").lower():
+                                    page = detail_tab
+                                    log("   Opened Docs (same tab)")
+                                    open_docs_clicked = True
+                                    break
+                        except Exception:
+                            continue
+
+                    if not open_docs_clicked:
+                        for selector in open_docs_selectors:
+                            try:
+                                open_docs_btn = detail_tab.query_selector(selector)
+                                if open_docs_btn and open_docs_btn.is_visible():
                                     open_docs_btn.click()
                                     time.sleep(3)
+                                    page = detail_tab
                                     open_docs_clicked = True
-                                    log(f"   Clicked 'Open in Docs'")
+                                    log("   Clicked 'Open in Docs' (fallback)")
                                     break
-                            except:
+                            except Exception:
                                 continue
-                    
+
                     if not open_docs_clicked:
-                        log(f"   ✗ Could not find 'Open in Docs' button")
-                        # Go back and continue
-                        page.goto(original_url)
-                        time.sleep(2)
+                        log("   ✗ Could not find 'Open in Docs' button")
+                        page = _return_to_summaries_list(None, detail_tab, original_url)
                         continue
                     
                     # Step 2: On Docs page, click the 3-dot menu (...)
@@ -603,9 +632,8 @@ def download_zoom_summaries(mode: str = "all", target_date: Optional[date] = Non
                             continue
                     
                     if not three_dot_clicked:
-                        log(f"   ✗ Could not find 3-dot menu")
-                        page.goto(original_url)
-                        time.sleep(2)
+                        log("   ✗ Could not find 3-dot menu")
+                        page = _return_to_summaries_list(docs_tab, detail_tab, original_url)
                         continue
                     
                     # Step 3: Click "Export" in the menu
@@ -623,9 +651,8 @@ def download_zoom_summaries(mode: str = "all", target_date: Optional[date] = Non
                         pass
                     
                     if not export_clicked:
-                        log(f"   ✗ Could not click Export")
-                        page.goto(original_url)
-                        time.sleep(2)
+                        log("   ✗ Could not click Export")
+                        page = _return_to_summaries_list(docs_tab, detail_tab, original_url)
                         continue
                     
                     # Step 4: Select "Word" from the export submenu
@@ -669,11 +696,10 @@ def download_zoom_summaries(mode: str = "all", target_date: Optional[date] = Non
                         log(f"   ✗ Error during Word export: {e}")
                     
                     if not download_clicked:
-                        log(f"   ✗ Could not complete Word export")
-                    
-                    # Go back to list page
-                    page.goto(original_url)
-                    time.sleep(2)
+                        log("   ✗ Could not complete Word export")
+
+                    # Close Docs tab if it was extra; always return list on the main tab
+                    page = _return_to_summaries_list(docs_tab, detail_tab, original_url)
                     
                     # Re-dismiss cookie popup if it reappears
                     try:
