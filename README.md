@@ -79,6 +79,14 @@ export ZOOM_PASSWORD="your-password"
 
 If unset, the script still runs but **auto-login is disabled** — sign in manually in the Chromium window.
 
+**Download folder:** by default files go to `~/Downloads`. On **AWS Lambda** (when `AWS_LAMBDA_FUNCTION_NAME` or `LAMBDA_TASK_ROOT` is set), the script **automatically** uses `/tmp/zoom_downloads`. Override anytime:
+
+```bash
+export ZOOM_DOWNLOAD_DIR="/path/you/want"
+```
+
+If `~/Downloads` cannot be created and you are not on Lambda, the script falls back to `$TMPDIR/zoom_agent_downloads` (usually under `/tmp`).
+
 ## Requirements
 
 - Python 3.7+

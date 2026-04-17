@@ -13,6 +13,7 @@ import argparse
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -34,6 +35,41 @@ def _safe_close_page(tab) -> None:
             tab.close()
     except Exception:
         pass
+
+
+def _running_on_aws_lambda() -> bool:
+    return bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get("LAMBDA_TASK_ROOT"))
+
+
+def _resolve_downloads_folder() -> Path:
+    """
+    Writable directory for exported DOCX files.
+
+    ``ZOOM_DOWNLOAD_DIR`` overrides everything if set.
+
+    On AWS Lambda, defaults to ``/tmp/zoom_downloads`` (``~/Downloads`` is usually missing).
+    Otherwise tries ``~/Downloads``, then the process temp directory.
+    """
+    override = os.environ.get("ZOOM_DOWNLOAD_DIR", "").strip()
+    if override:
+        p = Path(override).expanduser()
+        p.mkdir(parents=True, exist_ok=True)
+        return p.resolve()
+    if _running_on_aws_lambda():
+        p = Path("/tmp/zoom_downloads")
+        p.mkdir(parents=True, exist_ok=True)
+        return p.resolve()
+    primary = Path.home() / "Downloads"
+    try:
+        primary.mkdir(parents=True, exist_ok=True)
+        return primary.resolve()
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "zoom_agent_downloads"
+        fallback.mkdir(parents=True, exist_ok=True)
+        log(
+            f"Note: could not use {primary}; saving to {fallback.resolve()}"
+        )
+        return fallback.resolve()
 
 
 def _return_to_summaries_list(docs_tab, detail_tab, list_url: str):
@@ -164,9 +200,7 @@ def download_zoom_summaries(mode: str = "all", target_date: Optional[date] = Non
     ZOOM_EMAIL = os.environ.get("ZOOM_EMAIL", "").strip()
     ZOOM_PASSWORD = os.environ.get("ZOOM_PASSWORD", "").strip()
 
-    # Set downloads folder
-    downloads_folder = Path.home() / "Downloads"
-    downloads_folder.mkdir(exist_ok=True)
+    downloads_folder = _resolve_downloads_folder()
 
     log("=" * 60)
     log("Zoom Meeting Summaries Downloader")
